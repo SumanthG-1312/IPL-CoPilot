@@ -288,5 +288,5 @@ def delete_session(
 
     return {
         "message": "Session cleared",
-        "session_id": session_id,
+        "session_id": session_id
     }
