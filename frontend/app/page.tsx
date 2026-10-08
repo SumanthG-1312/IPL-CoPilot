@@ -1,8 +1,10 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import { ArrowUp, Plus, Search } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { motion } from "motion/react";
+import { ArrowUp, Plus, Search } from "lucide-react";
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
@@ -114,6 +116,109 @@ function StadiumBackground() {
   );
 }
 
+function AssistantResponse({
+  content,
+}: {
+  content: string;
+}) {
+  return (
+    <div className="prose prose-invert max-w-none">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          h1: ({ children }) => (
+            <h1 className="mb-3 text-lg font-semibold text-white">
+              {children}
+            </h1>
+          ),
+
+          h2: ({ children }) => (
+            <h2 className="mb-3 text-base font-semibold text-white">
+              {children}
+            </h2>
+          ),
+
+          h3: ({ children }) => (
+            <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-cyan-300">
+              {children}
+            </h3>
+          ),
+
+          p: ({ children }) => (
+            <p className="mb-3 text-sm leading-6 text-white/75 last:mb-0">
+              {children}
+            </p>
+          ),
+
+          strong: ({ children }) => (
+            <strong className="font-semibold text-white">
+              {children}
+            </strong>
+          ),
+
+          ul: ({ children }) => (
+            <ul className="mb-3 space-y-2 pl-5 text-sm text-white/75">
+              {children}
+            </ul>
+          ),
+
+          ol: ({ children }) => (
+            <ol className="mb-3 space-y-2 pl-5 text-sm text-white/75">
+              {children}
+            </ol>
+          ),
+
+          li: ({ children }) => (
+            <li className="leading-6">{children}</li>
+          ),
+
+          table: ({ children }) => (
+            <div className="my-4 w-full overflow-x-auto rounded-xl border border-white/[0.10]">
+              <table className="w-full min-w-[520px] border-collapse text-sm">
+                {children}
+              </table>
+            </div>
+          ),
+
+          thead: ({ children }) => (
+            <thead className="bg-white/[0.06]">{children}</thead>
+          ),
+
+          tbody: ({ children }) => (
+            <tbody>{children}</tbody>
+          ),
+
+          tr: ({ children }) => (
+            <tr className="border-b border-white/[0.07] last:border-b-0">
+              {children}
+            </tr>
+          ),
+
+          th: ({ children }) => (
+            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-cyan-300">
+              {children}
+            </th>
+          ),
+
+          td: ({ children }) => (
+            <td className="px-4 py-3 text-white/80">
+              {children}
+            </td>
+          ),
+
+          code: ({ children }) => (
+            <code className="rounded bg-white/[0.08] px-1.5 py-0.5 text-xs text-cyan-200">
+              {children}
+            </code>
+          ),
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 export default function Home() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -149,12 +254,14 @@ export default function Home() {
         }),
       });
 
-     if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(
-      `Backend error ${response.status}: ${errorText}`
-  );
-}
+      if (!response.ok) {
+        const errorText = await response.text();
+
+        throw new Error(
+          `Backend error ${response.status}: ${errorText}`
+        );
+      }
+
       const data: AskResponse = await response.json();
 
       setSessionId(data.session_id);
@@ -166,25 +273,27 @@ export default function Home() {
           content: data.answer,
         },
       ]);
-    }  catch (error) {
-  console.error("IPL Copilot API error:", error);
+    } catch (error) {
+      console.error("IPL Copilot API error:", error);
 
-  setMessages((current) => [
-    ...current,
-    {
-      role: "assistant",
-      content:
-        error instanceof Error
-          ? error.message
-          : "Unknown backend error",
-    },
-  ]);
-} finally {
-  setLoading(false);
-}
+      setMessages((current) => [
+        ...current,
+        {
+          role: "assistant",
+          content:
+            error instanceof Error
+              ? error.message
+              : "Unknown backend error",
+        },
+      ]);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = (
+    event: FormEvent<HTMLFormElement>
+  ) => {
     event.preventDefault();
     sendMessage(input);
   };
@@ -283,7 +392,9 @@ export default function Home() {
                       }}
                       whileHover={{ y: -2 }}
                       whileTap={{ scale: 0.98 }}
-                      onClick={() => handleSuggestion(suggestion)}
+                      onClick={() =>
+                        handleSuggestion(suggestion)
+                      }
                       className="rounded-full border border-white/[0.12] bg-[#071018]/55 px-7 py-3 text-sm font-medium text-white/80 shadow-[0_10px_35px_rgba(0,0,0,0.22)] backdrop-blur-xl transition-all duration-300 hover:border-cyan-300/25 hover:bg-[#0A1820]/65 hover:text-white"
                     >
                       {suggestion}
@@ -315,7 +426,13 @@ export default function Home() {
                         : "max-w-[85%] rounded-2xl rounded-bl-md border border-white/[0.10] bg-black/25 px-5 py-4 text-sm leading-6 text-white/75 shadow-[0_15px_45px_rgba(0,0,0,0.3)] backdrop-blur-2xl"
                     }
                   >
-                    {message.content}
+                    {message.role === "assistant" ? (
+                      <AssistantResponse
+                        content={message.content}
+                      />
+                    ) : (
+                      message.content
+                    )}
                   </motion.div>
                 ))}
 
@@ -327,7 +444,9 @@ export default function Home() {
                   >
                     <div className="flex items-center gap-1.5">
                       <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300" />
+
                       <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300 [animation-delay:150ms]" />
+
                       <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300 [animation-delay:300ms]" />
                     </div>
                   </motion.div>
@@ -367,7 +486,9 @@ export default function Home() {
                 type="text"
                 value={input}
                 disabled={loading}
-                onChange={(event) => setInput(event.target.value)}
+                onChange={(event) =>
+                  setInput(event.target.value)
+                }
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
                     event.preventDefault();
@@ -382,10 +503,14 @@ export default function Home() {
                 type="submit"
                 disabled={!input.trim() || loading}
                 whileHover={
-                  input.trim() && !loading ? { scale: 1.04 } : {}
+                  input.trim() && !loading
+                    ? { scale: 1.04 }
+                    : {}
                 }
                 whileTap={
-                  input.trim() && !loading ? { scale: 0.96 } : {}
+                  input.trim() && !loading
+                    ? { scale: 0.96 }
+                    : {}
                 }
                 className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-sky-300 to-blue-500 text-white shadow-[0_0_30px_rgba(59,130,246,0.18)] transition-all duration-300 hover:shadow-[0_0_42px_rgba(59,130,246,0.28)] disabled:cursor-not-allowed disabled:opacity-30"
               >
@@ -395,7 +520,8 @@ export default function Home() {
           </form>
 
           <p className="mt-3 text-center text-[10px] text-white/25">
-            IPL Copilot can make mistakes. Verify important statistics.
+            IPL Copilot can make mistakes. Verify important
+            statistics.
           </p>
         </motion.div>
       </div>
