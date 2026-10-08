@@ -149,12 +149,12 @@ export default function Home() {
         }),
       });
 
-      if (!response.ok) {
-        throw new Error(
-          `Request failed with status ${response.status}`
-        );
-      }
-
+     if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+      `Backend error ${response.status}: ${errorText}`
+  );
+}
       const data: AskResponse = await response.json();
 
       setSessionId(data.session_id);
@@ -166,20 +166,22 @@ export default function Home() {
           content: data.answer,
         },
       ]);
-    } catch (error) {
-      console.error("IPL Copilot API error:", error);
+    }  catch (error) {
+  console.error("IPL Copilot API error:", error);
 
-      setMessages((current) => [
-        ...current,
-        {
-          role: "assistant",
-          content:
-            "I couldn't connect to the IPL Copilot backend. Make sure FastAPI is running on port 8000.",
-        },
-      ]);
-    } finally {
-      setLoading(false);
-    }
+  setMessages((current) => [
+    ...current,
+    {
+      role: "assistant",
+      content:
+        error instanceof Error
+          ? error.message
+          : "Unknown backend error",
+    },
+  ]);
+} finally {
+  setLoading(false);
+}
   };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
