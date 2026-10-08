@@ -5,6 +5,8 @@ import uuid
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+
 # ============================================================
 # INTERNAL MODULES
 # ============================================================
@@ -28,6 +30,7 @@ app = FastAPI(
 # ============================================================
 # CORS
 # ============================================================
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -38,6 +41,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # ============================================================
 # SESSION STORAGE
@@ -151,7 +155,10 @@ def ask_question(
     # Check planner result
     # --------------------------------------------------------
 
-    if not isinstance(planner_result, dict):
+    if not isinstance(
+        planner_result,
+        dict,
+    ):
         raise HTTPException(
             status_code=500,
             detail="SQL planner returned an invalid response.",
@@ -171,8 +178,13 @@ def ask_question(
         sessions[session_id]["questions"].append(
             {
                 "question": question,
-                "answer": reason,
+                "answer": str(reason),
             }
+        )
+
+        # Keep only latest 20 questions
+        sessions[session_id]["questions"] = (
+            sessions[session_id]["questions"][-20:]
         )
 
         return QuestionResponse(
@@ -208,14 +220,21 @@ def ask_question(
         ) from error
 
     # ========================================================
-    # STEP 4: GENERATE NATURAL-LANGUAGE RESPONSE
+    # STEP 4: GENERATE FINAL RESPONSE
     # ========================================================
 
     try:
         answer = generate_response(
-        planner_result.get("resolved_question", question),
-        result,
-)
+            planner_result.get(
+                "resolved_question",
+                question,
+            ),
+            result,
+            use_llm=not planner_result.get(
+                "fast_path",
+                False,
+            ),
+        )
 
     except Exception as error:
         raise HTTPException(
@@ -285,5 +304,5 @@ def delete_session(
 
     return {
         "message": "Session cleared",
-        "session_id": session_id
+        "session_id": session_id,
     }

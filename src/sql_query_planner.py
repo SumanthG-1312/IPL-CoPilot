@@ -1,17 +1,20 @@
+from __future__ import annotations
+
 import json
 import os
 import re
 from typing import Literal, Optional
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
 from langchain_groq import ChatGroq
+from pydantic import BaseModel, Field
 
 from .entity_resolver import (
     players,
     teams,
     TEAM_ALIASES,
     resolve_entity,
+    find_player_mentions,
 )
 from .schema_inspector import inspect_csv
 
@@ -44,9 +47,11 @@ llm = ChatGroq(
     model=MODEL,
     api_key=GROQ_API_KEY,
     temperature=0,
-    max_tokens=2000,
+    max_tokens=900,
     reasoning_effort="none",
 )
+
+
 # ============================================================
 # STRUCTURED OUTPUT
 # ============================================================
@@ -58,12 +63,12 @@ class SQLPlan(BaseModel):
 
     sql: Optional[str] = Field(
         default=None,
-        description="A single safe read-only SQL query."
+        description="A single safe read-only SQL query.",
     )
 
     reason: Optional[str] = Field(
         default=None,
-        description="Reason when the request is unsupported."
+        description="Reason when the request is unsupported.",
     )
 
 
@@ -71,7 +76,7 @@ structured_llm = llm.with_structured_output(SQLPlan)
 
 
 # ============================================================
-# METRICS
+# METRIC ROLES
 # ============================================================
 
 METRIC_ROLES = {
@@ -94,6 +99,10 @@ METRIC_ROLES = {
     "partnership_runs": "player_pair",
 }
 
+
+# ============================================================
+# METRIC PHRASES
+# ============================================================
 
 METRIC_PHRASES = {
     "strike_rate": [
@@ -216,6 +225,10 @@ LEG_BYE_VALUES = (
 PENALTY_VALUES = "'penalty', 'penalty runs'"
 
 
+# ============================================================
+# LEGAL BALLS
+# ============================================================
+
 LEGAL_BALLS = f"""
 SUM(
     CASE
@@ -232,6 +245,10 @@ SUM(
 )
 """
 
+
+# ============================================================
+# AUTHORITATIVE METRIC SQL
+# ============================================================
 
 METRIC_SQL_EXPRESSIONS = {
     "runs": """
@@ -499,12 +516,14 @@ SUM(
 # ============================================================
 
 def normalize(value: str) -> str:
-    return " ".join(
-        str(value)
-        .lower()
-        .replace("-", " ")
-        .replace("_", " ")
-        .split()
+    return (
+        " ".join(
+            str(value)
+            .lower()
+            .replace("-", " ")
+            .replace("_", " ")
+            .split()
+        )
     )
 
 
@@ -512,14 +531,23 @@ def normalize(value: str) -> str:
 # METRIC DETECTION
 # ============================================================
 
-def detect_requested_metrics(question: str) -> list[str]:
-    normalized_question = normalize(question)
+def detect_requested_metrics(
+    question: str,
+) -> list[str]:
+
+    normalized_question = normalize(
+        question
+    )
 
     matches = []
 
     for metric, phrases in METRIC_PHRASES.items():
+
         for phrase in phrases:
-            normalized_phrase = normalize(phrase)
+
+            normalized_phrase = normalize(
+                phrase
+            )
 
             match = re.search(
                 rf"\b{re.escape(normalized_phrase)}\b",
@@ -527,6 +555,7 @@ def detect_requested_metrics(question: str) -> list[str]:
             )
 
             if match:
+
                 matches.append(
                     (
                         match.start(),
@@ -535,6 +564,7 @@ def detect_requested_metrics(question: str) -> list[str]:
                     )
                 )
 
+    # Prefer longer phrase matches.
     matches.sort(
         key=lambda item: (
             item[1] - item[0],
@@ -547,6 +577,7 @@ def detect_requested_metrics(question: str) -> list[str]:
     occupied = []
 
     for start, end, metric in matches:
+
         overlaps = any(
             start < other_end
             and end > other_start
@@ -556,11 +587,14 @@ def detect_requested_metrics(question: str) -> list[str]:
         if overlaps:
             continue
 
-        occupied.append((start, end))
+        occupied.append(
+            (start, end)
+        )
 
         if metric not in detected:
             detected.append(metric)
 
+    # "partnership" already represents runs.
     if (
         "partnership_runs" in detected
         and "runs" in detected
@@ -571,117 +605,103 @@ def detect_requested_metrics(question: str) -> list[str]:
 
 
 # ============================================================
-# ENTITY DETECTION
+# DEFAULT RANKING METRIC
 # ============================================================
 
+def infer_default_ranking_metric(
+    question: str,
+) -> list[str]:
+    """
+    Infer a default metric when a ranking question
+    specifies a batting/bowling role but no metric.
+
+    Examples:
+        Top 5 batters -> runs
+        Top 5 batsmen -> runs
+        Top 5 bowlers -> wickets
+    """
+
+    normalized = normalize(
+        question
+    )
+
+    # Must be a ranking-style request.
+    if not re.search(
+        r"\b(top|highest|most|leading|rank|ranking)\b",
+        normalized,
+    ):
+        return []
+
+    # --------------------------------------------------------
+    # Batting ranking
+    # --------------------------------------------------------
+
+    if re.search(
+        r"\b(batter|batters|batsman|batsmen)\b",
+        normalized,
+    ):
+        return ["runs"]
+
+    # --------------------------------------------------------
+    # Bowling ranking
+    # --------------------------------------------------------
+
+    if re.search(
+        r"\b(bowler|bowlers)\b",
+        normalized,
+    ):
+        return ["wickets"]
+
+    return []
+
+
+# ============================================================
+# ENTITY DETECTION
+# ============================================================
 def detect_entity_mentions(question: str):
+    """
+    Detect players and teams using the dynamic entity resolver.
+
+    Player names/aliases come from the dataset through
+    entity_resolver.py. No individual player names are hardcoded.
+    """
+
     normalized_question = normalize(question)
 
     mentions = []
 
-    words = re.findall(
-        r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?",
-        question,
+    # ========================================================
+    # PLAYERS
+    # ========================================================
+
+    player_mentions = find_player_mentions(
+        question
     )
 
-    clean_words = [
-        re.sub(
-            r"['’]s$",
-            "",
-            word,
-            flags=re.IGNORECASE,
+    for mention in player_mentions:
+
+        mentions.append(
+            {
+                "type": "player",
+                "value": mention["value"],
+            }
         )
-        for word in words
-    ]
 
-    # --------------------------------------------------------
-    # Players
-    # --------------------------------------------------------
-
-    player_surnames = set()
-
-    for player in players:
-        parts = normalize(player).split()
-
-        if len(parts) >= 2:
-            surname = parts[-1]
-
-            if len(surname) >= 4:
-                player_surnames.add(surname)
-
-    for index, word in enumerate(clean_words):
-        normalized_word = normalize(word)
-
-        if normalized_word not in player_surnames:
-            continue
-
-        candidates = []
-
-        for size in range(
-            min(3, index + 1),
-            0,
-            -1,
-        ):
-            start = index - size + 1
-
-            candidate = " ".join(
-                clean_words[start:index + 1]
-            ).strip()
-
-            if not candidate:
-                continue
-
-            result = resolve_entity(
-                candidate,
-                "player",
-            )
-
-            if result.get("status") == "resolved":
-                candidates.append(
-                    {
-                        "value": candidate,
-                        "score": result.get(
-                            "score",
-                            0,
-                        ),
-                        "length": size,
-                    }
-                )
-
-        if candidates:
-            best = max(
-                candidates,
-                key=lambda item: (
-                    item["score"],
-                    item["length"],
-                ),
-            )
-
-            mentions.append(
-                {
-                    "type": "player",
-                    "value": best["value"],
-                }
-            )
-        else:
-            mentions.append(
-                {
-                    "type": "player",
-                    "value": normalized_word,
-                }
-            )
-
-    # --------------------------------------------------------
-    # Teams
-    # --------------------------------------------------------
+    # ========================================================
+    # TEAMS
+    # ========================================================
 
     for team in teams:
-        normalized_team = normalize(team)
+
+        normalized_team = normalize(
+            team
+        )
 
         if re.search(
             rf"\b{re.escape(normalized_team)}\b",
             normalized_question,
         ):
+
             mentions.append(
                 {
                     "type": "team",
@@ -689,38 +709,53 @@ def detect_entity_mentions(question: str):
                 }
             )
 
-    for alias in TEAM_ALIASES:
-        normalized_alias = normalize(alias)
+    # ========================================================
+    # TEAM ALIASES
+    # ========================================================
+
+    for alias, canonical_team in TEAM_ALIASES.items():
+
+        normalized_alias = normalize(
+            alias
+        )
 
         if re.search(
             rf"\b{re.escape(normalized_alias)}\b",
             normalized_question,
         ):
+
             mentions.append(
                 {
                     "type": "team",
-                    "value": alias,
+                    "value": canonical_team,
                 }
             )
 
-    # --------------------------------------------------------
-    # Remove duplicates
-    # --------------------------------------------------------
+    # ========================================================
+    # REMOVE DUPLICATES
+    # ========================================================
 
     unique_mentions = []
+
     seen = set()
 
     for mention in mentions:
+
         key = (
             mention["type"],
-            normalize(mention["value"]),
+            normalize(
+                mention["value"]
+            ),
         )
 
         if key in seen:
             continue
 
         seen.add(key)
-        unique_mentions.append(mention)
+
+        unique_mentions.append(
+            mention
+        )
 
     return unique_mentions
 
@@ -729,13 +764,19 @@ def detect_entity_mentions(question: str):
 # ENTITY RESOLUTION
 # ============================================================
 
-def resolve_question_entities(question: str):
-    mentions = detect_entity_mentions(question)
+def resolve_question_entities(
+    question: str,
+):
+
+    mentions = detect_entity_mentions(
+        question
+    )
 
     resolved_question = question
     resolutions = []
 
     for mention in mentions:
+
         entity_type = mention["type"]
         value = mention["value"]
 
@@ -744,20 +785,27 @@ def resolve_question_entities(question: str):
             entity_type,
         )
 
-        status = result.get("status")
+        status = result.get(
+            "status"
+        )
 
         if status == "resolved":
-            resolved_value = result["resolved_value"]
+
+            resolved_value = result[
+                "resolved_value"
+            ]
 
             pattern = re.compile(
                 re.escape(value),
                 re.IGNORECASE,
             )
 
-            resolved_question = pattern.sub(
-                resolved_value,
-                resolved_question,
-                count=1,
+            resolved_question = (
+                pattern.sub(
+                    resolved_value,
+                    resolved_question,
+                    count=1,
+                )
             )
 
             resolutions.append(
@@ -769,6 +817,7 @@ def resolve_question_entities(question: str):
             )
 
         elif status == "ambiguous":
+
             candidates = result.get(
                 "candidates",
                 [],
@@ -784,19 +833,26 @@ def resolve_question_entities(question: str):
             )
 
         elif status == "not_found":
+
             raise ValueError(
                 f"Could not resolve "
                 f"{entity_type} '{value}'."
             )
 
-    return resolved_question, resolutions
+    return (
+        resolved_question,
+        resolutions,
+    )
 
 
 # ============================================================
-# SCHEMA
+# SCHEMA CONTEXT
 # ============================================================
 
-def build_schema_context(schema) -> str:
+def build_schema_context(
+    schema,
+) -> str:
+
     columns = schema.get(
         "columns",
         [],
@@ -809,7 +865,12 @@ def build_schema_context(schema) -> str:
     ]
 
     for column in columns:
-        if isinstance(column, dict):
+
+        if isinstance(
+            column,
+            dict,
+        ):
+
             name = column.get(
                 "name",
                 "",
@@ -823,12 +884,16 @@ def build_schema_context(schema) -> str:
             lines.append(
                 f"- {name} ({dtype})"
             )
+
         else:
+
             lines.append(
                 f"- {column}"
             )
 
-    return "\n".join(lines)
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
@@ -838,11 +903,13 @@ def build_schema_context(schema) -> str:
 def build_metric_context(
     requested_metrics: list[str],
 ) -> str:
+
     lines = [
         "AVAILABLE METRIC PLACEHOLDERS:"
     ]
 
     for metric in requested_metrics:
+
         if metric not in METRIC_SQL_EXPRESSIONS:
             continue
 
@@ -856,7 +923,9 @@ def build_metric_context(
             f"(role: {role})"
         )
 
-    return "\n".join(lines)
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
@@ -866,8 +935,7 @@ def build_metric_context(
 PLANNER_PROMPT = """
 You are the SQL planning engine for IPL Copilot.
 
-Convert the user's natural-language IPL analytics question
-into ONE safe DuckDB SQL query.
+Generate ONE safe DuckDB SQL query for the user's IPL analytics question.
 
 DATABASE TABLE:
 {table_name}
@@ -882,9 +950,9 @@ USER QUESTION:
 {question}
 
 IMPORTANT RULES
-================
+==============
 
-1. Return only a read-only SELECT or WITH query.
+1. Return only a single read-only SELECT or WITH query.
 
 2. Never use:
    INSERT
@@ -894,42 +962,37 @@ IMPORTANT RULES
    ALTER
    CREATE
    TRUNCATE
+   REPLACE
+   MERGE
    COPY
    EXPORT
    IMPORT
    ATTACH
    DETACH
 
-3. Never use external file/network functions.
+3. Never use external file or network functions.
 
-4. Use only columns present in the supplied schema.
+4. Use only the supplied table and schema.
 
-5. For columns containing hyphens, use double quotes.
+5. Quote hyphenated columns.
    Example:
    "non-striker"
 
-6. Registered metrics MUST use their placeholders.
+6. Every requested registered metric MUST use its exact placeholder.
 
    Example:
-   SELECT __METRIC_runs__ AS total_runs
+   __METRIC_runs__ AS total_runs
 
 7. A metric placeholder represents the COMPLETE metric expression.
 
-   NEVER wrap it inside another SQL function.
+   Never wrap it inside:
+   SUM()
+   AVG()
+   COUNT()
+   MIN()
+   MAX()
 
-   WRONG:
-   SELECT SUM(__METRIC_runs__)
-
-   WRONG:
-   SELECT __METRIC_runs__ AS SUM(batsman_run)
-
-   WRONG:
-   SELECT AVG(__METRIC_runs__)
-
-   CORRECT:
-   SELECT __METRIC_runs__ AS total_runs
-
-8. Always use a simple identifier as the alias.
+8. Always use simple aliases.
 
    Examples:
    __METRIC_runs__ AS total_runs
@@ -938,31 +1001,29 @@ IMPORTANT RULES
    __METRIC_wickets__ AS total_wickets
    __METRIC_strike_rate__ AS strike_rate
 
-9. For batting:
-   use batter = 'PLAYER'
+9. For batting player statistics:
+   batter = 'PLAYER'
 
-10. For bowling:
-    use bowler = 'PLAYER'
+10. For bowling player statistics:
+    bowler = 'PLAYER'
 
 11. For team batting statistics:
-    use:
     BattingTeam = 'TEAM'
 
-12. For "against", "vs", or "versus":
+12. For against/vs/versus TEAM:
+    TEAM is the opponent.
 
-    The mentioned team is the opponent.
-
-    Do NOT use that team as BattingTeam for the player.
-
-    Instead identify matches using:
+    Identify matches using:
 
     ID IN (
         SELECT DISTINCT ID
         FROM {table_name}
-        WHERE BattingTeam = 'OPPONENT'
+        WHERE BattingTeam = 'TEAM'
     )
 
-13. Partnership questions must match BOTH orientations:
+    Then exclude the opponent innings when appropriate.
+
+13. Partnership questions must match both directions:
 
     (
         batter = 'PLAYER_A'
@@ -977,21 +1038,19 @@ IMPORTANT RULES
     Use:
     __METRIC_partnership_runs__
 
-14. For rankings:
-
-    Batting:
+14. For batting rankings:
     GROUP BY batter
 
-    Bowling:
+15. For bowling rankings:
     GROUP BY bowler
 
-    Order by the requested metric.
+16. Order rankings by the requested metric.
 
-15. Do not add unnecessary GROUP BY columns.
+17. Do not add unnecessary GROUP BY columns.
 
-16. Do not invent tables, columns, players or teams.
+18. Do not invent tables, columns, players, teams, or metrics.
 
-17. Return a single SQL statement.
+19. Return unsupported when the dataset cannot answer the question.
 """
 
 
@@ -1012,24 +1071,36 @@ def call_planner(
         question=question,
     )
 
-    result = structured_llm.invoke(prompt)
+    result = structured_llm.invoke(
+        prompt
+    )
 
-    if not isinstance(result, SQLPlan):
-        result = SQLPlan.model_validate(result)
+    if not isinstance(
+        result,
+        SQLPlan,
+    ):
+
+        result = SQLPlan.model_validate(
+            result
+        )
 
     return result
 
 
 # ============================================================
-# PLACEHOLDER REPLACEMENT
+# METRIC PLACEHOLDER REPLACEMENT
 # ============================================================
 
-def replace_metric_placeholders(sql: str) -> str:
+def replace_metric_placeholders(
+    sql: str,
+) -> str:
+
     result = sql
 
     for metric_name, expression in (
         METRIC_SQL_EXPRESSIONS.items()
     ):
+
         placeholder = (
             f"__METRIC_{metric_name}__"
         )
@@ -1053,71 +1124,96 @@ def normalize_metric_placeholder_wrappers(
     result = sql
 
     for metric_name in METRIC_SQL_EXPRESSIONS:
+
         placeholder = (
             f"__METRIC_{metric_name}__"
         )
 
-        for function_name in (
-            "SUM",
-            "AVG",
-            "COUNT",
-            "MIN",
-            "MAX",
-        ):
-            pattern = (
-                rf"{function_name}\s*"
-                rf"\(\s*"
-                rf"{re.escape(placeholder)}"
-                rf"\s*\)"
-            )
+        pattern = re.compile(
+            rf"""
+            \b(?:SUM|AVG|COUNT|MIN|MAX)
+            \s*\(
+                \s*{re.escape(placeholder)}\s*
+            \)
+            """,
+            flags=re.IGNORECASE
+            | re.VERBOSE,
+        )
 
-            result = re.sub(
-                pattern,
-                placeholder,
-                result,
-                flags=re.IGNORECASE,
-            )
+        result = pattern.sub(
+            placeholder,
+            result,
+        )
 
     return result
 
+
+# ============================================================
+# METRIC EXPRESSION ENFORCEMENT
+# ============================================================
 
 def enforce_metric_placeholders(
     sql: str,
     requested_metrics: list[str],
 ) -> str:
     """
-    Replace common LLM-generated metric expressions with
-    the authoritative metric placeholders.
+    Replace common LLM-generated metric expressions
+    with authoritative placeholders.
     """
 
     result = sql
 
-    replacements = {
+    simple_patterns = {
         "runs": [
-            r"SUM\s*\(\s*(?:batsman_run|total_run)\s*\)",
+            r"""
+            SUM\s*\(
+                \s*(?:batsman_run|total_run)\s*
+            \)
+            """,
         ],
 
         "fours": [
-            r"SUM\s*\(\s*CASE\s+WHEN\s+batsman_run\s*=\s*4.*?END\s*\)",
+            r"""
+            SUM\s*\(
+                \s*CASE\s+WHEN\s+batsman_run\s*=\s*4
+                .*?
+                END\s*
+            \)
+            """,
         ],
 
         "sixes": [
-            r"SUM\s*\(\s*CASE\s+WHEN\s+batsman_run\s*=\s*6.*?END\s*\)",
+            r"""
+            SUM\s*\(
+                \s*CASE\s+WHEN\s+batsman_run\s*=\s*6
+                .*?
+                END\s*
+            \)
+            """,
         ],
     }
 
     for metric in requested_metrics:
-        placeholder = f"__METRIC_{metric}__"
+
+        placeholder = (
+            f"__METRIC_{metric}__"
+        )
 
         if placeholder in result:
             continue
 
-        for pattern in replacements.get(metric, []):
+        for pattern in simple_patterns.get(
+            metric,
+            [],
+        ):
+
             result = re.sub(
                 pattern,
                 placeholder,
                 result,
-                flags=re.IGNORECASE | re.DOTALL,
+                flags=re.IGNORECASE
+                | re.DOTALL
+                | re.VERBOSE,
             )
 
             if placeholder in result:
@@ -1126,15 +1222,15 @@ def enforce_metric_placeholders(
     return result
 
 
-def repair_metric_aliases(sql: str) -> str:
+# ============================================================
+# METRIC ALIAS REPAIR
+# ============================================================
+
+def repair_metric_aliases(
+    sql: str,
+) -> str:
     """
-    Repairs invalid aliases such as:
-
-        SELECT __METRIC_runs__ AS SUM(batsman_run)
-
-    into:
-
-        SELECT __METRIC_runs__ AS total_runs
+    Repair invalid aliases after metric placeholders.
     """
 
     aliases = {
@@ -1158,20 +1254,34 @@ def repair_metric_aliases(sql: str) -> str:
     result = sql
 
     for metric, alias in aliases.items():
-        placeholder = f"__METRIC_{metric}__"
 
-        pattern = (
-            rf"({re.escape(placeholder)})"
-            rf"\s+AS\s+"
-            rf"(?:SUM|AVG|COUNT|MIN|MAX)"
-            rf"\s*\([^)]*\)"
+        placeholder = (
+            f"__METRIC_{metric}__"
         )
 
-        result = re.sub(
-            pattern,
+        pattern = re.compile(
+            rf"""
+            ({re.escape(placeholder)})
+            \s+AS\s+
+            (?:
+                SUM|
+                AVG|
+                COUNT|
+                MIN|
+                MAX
+            )
+            \s*\(
+                .*?
+            \)
+            """,
+            flags=re.IGNORECASE
+            | re.DOTALL
+            | re.VERBOSE,
+        )
+
+        result = pattern.sub(
             rf"\1 AS {alias}",
             result,
-            flags=re.IGNORECASE,
         )
 
     return result
@@ -1191,18 +1301,31 @@ def repair_schema_column_names(
         [],
     )
 
+    result = sql
+
     for column in columns:
-        if isinstance(column, dict):
+
+        if isinstance(
+            column,
+            dict,
+        ):
+
             actual_name = column.get(
                 "name",
                 "",
             )
+
         else:
-            actual_name = str(column)
+
+            actual_name = str(
+                column
+            )
 
         if not actual_name:
             continue
 
+        # Only repair names that contain
+        # spaces, hyphens or other special chars.
         if not re.search(
             r"[^A-Za-z0-9_]",
             actual_name,
@@ -1219,23 +1342,29 @@ def repair_schema_column_names(
             normalized_variant
             and normalized_variant != actual_name
         ):
-            sql = re.sub(
-                rf"\b"
-                rf"{re.escape(normalized_variant)}"
-                rf"\b",
+
+            result = re.sub(
+                rf"\b{re.escape(normalized_variant)}\b",
                 f'"{actual_name}"',
-                sql,
+                result,
             )
 
-    return sql
+    return result
 
 
 # ============================================================
-# SQL SAFETY
+# SQL SAFETY VALIDATION
 # ============================================================
 
-def validate_sql(sql: str) -> str:
-    if not isinstance(sql, str):
+def validate_sql(
+    sql: str,
+) -> str:
+
+    if not isinstance(
+        sql,
+        str,
+    ):
+
         raise ValueError(
             "Generated SQL must be a string."
         )
@@ -1243,6 +1372,7 @@ def validate_sql(sql: str) -> str:
     sql = sql.strip()
 
     if not sql:
+
         raise ValueError(
             "Generated SQL is empty."
         )
@@ -1254,6 +1384,7 @@ def validate_sql(sql: str) -> str:
     ]
 
     if len(statements) != 1:
+
         raise ValueError(
             "Only one SQL statement is allowed."
         )
@@ -1270,6 +1401,7 @@ def validate_sql(sql: str) -> str:
         normalized.startswith("select ")
         or normalized.startswith("with ")
     ):
+
         raise ValueError(
             "Only SELECT or WITH queries are allowed."
         )
@@ -1292,7 +1424,9 @@ def validate_sql(sql: str) -> str:
     ]
 
     for keyword in forbidden:
+
         if keyword in normalized:
+
             raise ValueError(
                 f"Forbidden SQL operation: "
                 f"{keyword.strip()}"
@@ -1309,7 +1443,9 @@ def validate_sql(sql: str) -> str:
     ]
 
     for function_name in external_functions:
+
         if function_name in normalized:
+
             raise ValueError(
                 "External file/network access "
                 "is not allowed."
@@ -1319,7 +1455,68 @@ def validate_sql(sql: str) -> str:
 
 
 # ============================================================
-# METRIC VALIDATION
+# SQL BALANCE VALIDATION
+# ============================================================
+
+def validate_sql_balance(
+    sql: str,
+) -> str:
+    """
+    Catch incomplete SQL caused by truncated output.
+    """
+
+    if not isinstance(
+        sql,
+        str,
+    ):
+
+        raise ValueError(
+            "Generated SQL must be a string."
+        )
+
+    if sql.count("(") != sql.count(")"):
+
+        raise ValueError(
+            "Generated SQL has unbalanced parentheses."
+        )
+
+    single_quotes = 0
+    double_quotes = 0
+
+    escaped = False
+
+    for char in sql:
+
+        if char == "\\" and not escaped:
+
+            escaped = True
+            continue
+
+        if char == "'" and not escaped:
+            single_quotes += 1
+
+        elif char == '"' and not escaped:
+            double_quotes += 1
+
+        escaped = False
+
+    if single_quotes % 2 != 0:
+
+        raise ValueError(
+            "Generated SQL has an unclosed single quote."
+        )
+
+    if double_quotes % 2 != 0:
+
+        raise ValueError(
+            "Generated SQL has an unclosed double quote."
+        )
+
+    return sql
+
+
+# ============================================================
+# METRIC PLACEHOLDER VALIDATION
 # ============================================================
 
 def validate_metric_placeholders(
@@ -1329,6 +1526,7 @@ def validate_metric_placeholders(
     missing = []
 
     for metric in requested_metrics:
+
         if metric not in METRIC_SQL_EXPRESSIONS:
             continue
 
@@ -1343,17 +1541,335 @@ def validate_metric_placeholders(
 
 
 # ============================================================
-# MAIN PIPELINE
+# FAST PATH
 # ============================================================
 
-def generate_sql(question: str):
+def try_fast_path(
+    question: str,
+    resolved_question: str,
+    resolutions: list,
+    requested_metrics: list[str],
+):
+    """
+    Handle common IPL analytics queries without calling Groq
+    for SQL planning.
+    """
+
+    if not requested_metrics:
+        return None
+
+    normalized = normalize(
+        resolved_question
+    )
+
+    player_resolutions = [
+        item["resolved"]
+        for item in resolutions
+        if item["type"] == "player"
+    ]
+
+    team_resolutions = [
+        item["resolved"]
+        for item in resolutions
+        if item["type"] == "team"
+    ]
+
+    opponent_phrases = [
+        "against",
+        "vs",
+        "versus",
+    ]
+
+    has_opponent_phrase = any(
+        phrase in normalized
+        for phrase in opponent_phrases
+    )
+
+    # ========================================================
+    # PARTNERSHIP
+    # ========================================================
+
+    if (
+        requested_metrics
+        == ["partnership_runs"]
+        and len(player_resolutions) == 2
+    ):
+
+        player_a = player_resolutions[0]
+        player_b = player_resolutions[1]
+
+        return f"""
+SELECT
+    __METRIC_partnership_runs__ AS partnership_runs
+FROM {TABLE_NAME}
+WHERE
+    (
+        batter = '{player_a}'
+        AND "non-striker" = '{player_b}'
+    )
+    OR
+    (
+        batter = '{player_b}'
+        AND "non-striker" = '{player_a}'
+    )
+""".strip()
+
+    # ========================================================
+    # RANKING LIMIT
+    # ========================================================
+
+    ranking_limit = None
+
+    top_match = re.search(
+        r"\btop\s+(\d+)\b",
+        normalized,
+    )
+
+    if top_match:
+
+        ranking_limit = int(
+            top_match.group(1)
+        )
+
+    elif re.search(
+        r"\b(most|highest|maximum|max|leading)\b",
+        normalized,
+    ):
+
+        ranking_limit = 1
+
+    # ========================================================
+    # RANKINGS
+    # ========================================================
+
+    if (
+        ranking_limit is not None
+        and 1 <= ranking_limit <= 100
+        and len(player_resolutions) == 0
+        and len(team_resolutions) == 0
+    ):
+
+        ranking_metric = None
+
+        ranking_candidates = [
+            "runs",
+            "fours",
+            "sixes",
+            "boundaries",
+            "balls_faced",
+            "strike_rate",
+            "dismissals",
+            "batting_average",
+            "wickets",
+            "balls_bowled",
+            "runs_conceded",
+            "economy",
+            "bowling_average",
+            "dot_balls",
+        ]
+
+        for metric in ranking_candidates:
+
+            if metric in requested_metrics:
+
+                ranking_metric = metric
+                break
+
+        if ranking_metric:
+
+            role = METRIC_ROLES.get(
+                ranking_metric
+            )
+
+            # ------------------------------------------------
+            # Batting ranking
+            # ------------------------------------------------
+
+            if role == "batter":
+
+                alias = (
+                    ranking_metric
+                )
+
+                return f"""
+SELECT
+    batter,
+    __METRIC_{ranking_metric}__ AS {alias}
+FROM {TABLE_NAME}
+GROUP BY batter
+ORDER BY {alias} DESC
+LIMIT {ranking_limit}
+""".strip()
+
+            # ------------------------------------------------
+            # Bowling ranking
+            # ------------------------------------------------
+
+            if role == "bowler":
+
+                alias = (
+                    ranking_metric
+                )
+
+                return f"""
+SELECT
+    bowler,
+    __METRIC_{ranking_metric}__ AS {alias}
+FROM {TABLE_NAME}
+GROUP BY bowler
+ORDER BY {alias} DESC
+LIMIT {ranking_limit}
+""".strip()
+
+    # ========================================================
+    # MOST RUNS AGAINST OPPONENT
+    # ========================================================
+
+    if (
+        "runs" in requested_metrics
+        and len(team_resolutions) == 1
+        and len(player_resolutions) == 0
+        and has_opponent_phrase
+        and re.search(
+            r"\b(most|highest|maximum|max)\b",
+            normalized,
+        )
+    ):
+
+        opponent = team_resolutions[0]
+
+        return f"""
+SELECT
+    batter,
+    __METRIC_runs__ AS total_runs
+FROM {TABLE_NAME}
+WHERE
+    ID IN (
+        SELECT DISTINCT ID
+        FROM {TABLE_NAME}
+        WHERE BattingTeam = '{opponent}'
+    )
+    AND BattingTeam <> '{opponent}'
+GROUP BY batter
+ORDER BY total_runs DESC
+LIMIT 1
+""".strip()
+
+    # ========================================================
+    # SINGLE PLAYER + SINGLE METRIC
+    # ========================================================
+
+    if (
+        len(player_resolutions) == 1
+        and len(requested_metrics) == 1
+    ):
+
+        player = player_resolutions[0]
+        metric = requested_metrics[0]
+
+        role = METRIC_ROLES.get(
+            metric
+        )
+
+        # ----------------------------------------------------
+        # Batter
+        # ----------------------------------------------------
+
+        if role == "batter":
+
+            if (
+                len(team_resolutions) == 1
+                and has_opponent_phrase
+            ):
+
+                opponent = (
+                    team_resolutions[0]
+                )
+
+                return f"""
+SELECT
+    __METRIC_{metric}__ AS {metric}
+FROM {TABLE_NAME}
+WHERE
+    batter = '{player}'
+    AND ID IN (
+        SELECT DISTINCT ID
+        FROM {TABLE_NAME}
+        WHERE BattingTeam = '{opponent}'
+    )
+""".strip()
+
+            return f"""
+SELECT
+    __METRIC_{metric}__ AS {metric}
+FROM {TABLE_NAME}
+WHERE batter = '{player}'
+""".strip()
+
+        # ----------------------------------------------------
+        # Bowler
+        # ----------------------------------------------------
+
+        if role == "bowler":
+
+            if (
+                len(team_resolutions) == 1
+                and has_opponent_phrase
+            ):
+
+                opponent = (
+                    team_resolutions[0]
+                )
+
+                return f"""
+SELECT
+    __METRIC_{metric}__ AS {metric}
+FROM {TABLE_NAME}
+WHERE
+    bowler = '{player}'
+    AND ID IN (
+        SELECT DISTINCT ID
+        FROM {TABLE_NAME}
+        WHERE BattingTeam = '{opponent}'
+    )
+""".strip()
+
+            return f"""
+SELECT
+    __METRIC_{metric}__ AS {metric}
+FROM {TABLE_NAME}
+WHERE bowler = '{player}'
+""".strip()
+
+    # ========================================================
+    # NO FAST PATH
+    # ========================================================
+
+    return None
+
+
+# ============================================================
+# MAIN SQL GENERATION PIPELINE
+# ============================================================
+
+def generate_sql(
+    question: str,
+):
+
+    # --------------------------------------------------------
+    # Validate question
+    # --------------------------------------------------------
 
     if not question or not question.strip():
+
         return {
             "status": "unsupported",
             "sql": None,
             "resolved_question": question,
             "reason": "Question is empty.",
+            "resolutions": [],
+            "metrics": [],
+            "fast_path": False,
         }
 
     # --------------------------------------------------------
@@ -1363,18 +1879,22 @@ def generate_sql(question: str):
     (
         resolved_question,
         resolutions,
-    ) = resolve_question_entities(question)
+    ) = resolve_question_entities(
+        question
+    )
 
     # --------------------------------------------------------
-    # Inspect dataset
+    # Inspect dataset schema
     # --------------------------------------------------------
 
     schema = inspect_csv(
         DATASET_PATH
     )
 
-    schema_context = build_schema_context(
-        schema
+    schema_context = (
+        build_schema_context(
+            schema
+        )
     )
 
     # --------------------------------------------------------
@@ -1387,41 +1907,84 @@ def generate_sql(question: str):
         )
     )
 
-    metric_context = build_metric_context(
-        requested_metrics
-    )
-
     # --------------------------------------------------------
-    # LangChain planner
+    # Infer default ranking metrics
+    #
+    # Top 5 batters -> runs
+    # Top 5 bowlers -> wickets
     # --------------------------------------------------------
 
-    result = call_planner(
-        resolved_question,
-        schema_context,
-        metric_context,
-    )
+    if not requested_metrics:
 
-    if result.status != "ready":
-        return {
-            "status": "unsupported",
-            "sql": None,
-            "resolved_question": resolved_question,
-            "reason": (
-                result.reason
-                or "Question is unsupported."
-            ),
-        }
-
-    sql = result.sql
-
-    if not sql:
-        raise ValueError(
-            "Planner did not return SQL."
+        requested_metrics = (
+            infer_default_ranking_metric(
+                resolved_question
+            )
         )
 
-    # --------------------------------------------------------
-    # Generic repairs
-    # --------------------------------------------------------
+    metric_context = (
+        build_metric_context(
+            requested_metrics
+        )
+    )
+
+    # ========================================================
+    # FAST PATH FIRST
+    # ========================================================
+
+    fast_sql = try_fast_path(
+        question,
+        resolved_question,
+        resolutions,
+        requested_metrics,
+    )
+
+    fast_path = (
+        fast_sql is not None
+    )
+
+    # ========================================================
+    # USE FAST PATH OR GROQ
+    # ========================================================
+
+    if fast_path:
+
+        sql = fast_sql
+
+    else:
+
+        result = call_planner(
+            resolved_question,
+            schema_context,
+            metric_context,
+        )
+
+        if result.status != "ready":
+
+            return {
+                "status": "unsupported",
+                "sql": None,
+                "resolved_question": resolved_question,
+                "reason": (
+                    result.reason
+                    or "Question is unsupported."
+                ),
+                "resolutions": resolutions,
+                "metrics": requested_metrics,
+                "fast_path": False,
+            }
+
+        sql = result.sql
+
+        if not sql:
+
+            raise ValueError(
+                "Planner did not return SQL."
+            )
+
+    # ========================================================
+    # GENERIC REPAIRS
+    # ========================================================
 
     sql = normalize_metric_placeholder_wrappers(
         sql
@@ -1432,16 +1995,18 @@ def generate_sql(question: str):
         requested_metrics,
     )
 
-    sql = repair_metric_aliases(sql)
+    sql = repair_metric_aliases(
+        sql
+    )
 
     sql = repair_schema_column_names(
         sql,
         schema,
     )
 
-    # --------------------------------------------------------
-    # Validate requested metrics
-    # --------------------------------------------------------
+    # ========================================================
+    # VALIDATE METRICS
+    # ========================================================
 
     missing_metrics = (
         validate_metric_placeholders(
@@ -1451,33 +2016,49 @@ def generate_sql(question: str):
     )
 
     if missing_metrics:
+
         raise ValueError(
-            "LLM did not use the required metric "
-            "placeholders: "
-            + ", ".join(missing_metrics)
+            "Required metric placeholders are missing: "
+            + ", ".join(
+                missing_metrics
+            )
         )
 
-    # --------------------------------------------------------
-    # Validate SQL before replacement
-    # --------------------------------------------------------
+    # ========================================================
+    # VALIDATE SQL BEFORE REPLACEMENT
+    # ========================================================
 
-    sql = validate_sql(sql)
+    sql = validate_sql(
+        sql
+    )
 
-    # --------------------------------------------------------
-    # Replace authoritative metrics
-    # --------------------------------------------------------
+    sql = validate_sql_balance(
+        sql
+    )
+
+    # ========================================================
+    # REPLACE AUTHORITATIVE METRICS
+    # ========================================================
 
     sql = replace_metric_placeholders(
         sql
     )
 
-    sql = validate_sql_balance(sql)
+    # ========================================================
+    # FINAL VALIDATION
+    # ========================================================
 
-    # --------------------------------------------------------
-    # Final validation
-    # --------------------------------------------------------
+    sql = validate_sql_balance(
+        sql
+    )
 
-    sql = validate_sql(sql)
+    sql = validate_sql(
+        sql
+    )
+
+    # ========================================================
+    # FINAL RESULT
+    # ========================================================
 
     return {
         "status": "ready",
@@ -1486,50 +2067,9 @@ def generate_sql(question: str):
         "reason": None,
         "resolutions": resolutions,
         "metrics": requested_metrics,
+        "fast_path": fast_path,
     }
 
-
-def validate_sql_balance(sql):
-    """
-    Catch incomplete SQL caused by truncated LLM output.
-    """
-    if not isinstance(sql, str):
-        raise ValueError("Generated SQL must be a string.")
-
-    if sql.count("(") != sql.count(")"):
-        raise ValueError(
-            "Generated SQL has unbalanced parentheses."
-        )
-
-    single_quotes = 0
-    double_quotes = 0
-
-    escaped = False
-
-    for char in sql:
-        if char == "\\" and not escaped:
-            escaped = True
-            continue
-
-        if char == "'" and not escaped:
-            single_quotes += 1
-
-        elif char == '"' and not escaped:
-            double_quotes += 1
-
-        escaped = False
-
-    if single_quotes % 2 != 0:
-        raise ValueError(
-            "Generated SQL has an unclosed single quote."
-        )
-
-    if double_quotes % 2 != 0:
-        raise ValueError(
-            "Generated SQL has an unclosed double quote."
-        )
-
-    return sql
 
 # ============================================================
 # CLI TEST MODE
@@ -1556,6 +2096,7 @@ if __name__ == "__main__":
             "quit",
             "q",
         }:
+
             break
 
         if not question:

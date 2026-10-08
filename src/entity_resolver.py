@@ -1,735 +1,996 @@
-import pandas as pd
-from rapidfuzz import fuzz, process
+import os
+import re
+from difflib import SequenceMatcher
+from collections import defaultdict
 
-from .query_schema import (
-    QueryAnalysis,
-    Subject,
-    Ambiguity,
+import pandas as pd
+from dotenv import load_dotenv
+
+
+# ============================================================
+# ENVIRONMENT
+# ============================================================
+
+load_dotenv()
+
+DATASET_PATH = os.getenv(
+    "IPL_DATASET_PATH",
+    "data/ipl_ball_by_ball_cleaned.csv",
 )
 
 
-DATA_PATH = "data/ipl_ball_by_ball_cleaned.csv"
-
-
-TEAM_ALIASES = {
-    "rcb": "Royal Challengers Bangalore",
-    "mi": "Mumbai Indians",
-    "csk": "Chennai Super Kings",
-    "kkr": "Kolkata Knight Riders",
-    "dc": "Delhi Capitals",
-    "srh": "Sunrisers Hyderabad",
-    "rr": "Rajasthan Royals",
-    "pbks": "Punjab Kings",
-    "kxip": "Kings XI Punjab",
-    "gt": "Gujarat Titans",
-    "lsg": "Lucknow Super Giants",
-    "rps": "Rising Pune Supergiant",
-    "rpsg": "Rising Pune Supergiant",
-}
-
-
-PLAYER_ALIASES = {
-    "rohit": "RG Sharma",
-    "rohit sharma": "RG Sharma",
-    "gautam gambhir": "G Gambhir",
-    "gautham gambhir": "G Gambhir",
-    "virat kohli": "V Kohli",
-    "ms dhoni": "MS Dhoni",
-    "mahendra singh dhoni": "MS Dhoni",
-    "sachin": "SR Tendulkar",
-    "sachin tendulkar": "SR Tendulkar",
-}
-
+# ============================================================
+# NORMALIZATION
+# ============================================================
 
 def normalize(value: str) -> str:
-    value = str(value).lower().strip()
+    """
+    Normalize text for matching.
+    """
+    if value is None:
+        return ""
 
-    value = value.replace(".", " ")
-    value = value.replace("-", " ")
+    value = str(value).strip().lower()
 
-    return " ".join(value.split())
+    value = value.replace("’", "'")
 
-
-def load_entities():
-    df = pd.read_csv(
-        DATA_PATH,
-        keep_default_na=False,
-        na_filter=False,
+    value = re.sub(
+        r"['’]",
+        "",
+        value,
     )
 
-    players = sorted(
-        set(
-            df["batter"].tolist()
-            + df["bowler"].tolist()
-            + df["non-striker"].tolist()
-        )
+    value = re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        value,
     )
 
-    teams = sorted(
-        set(
-            df["BattingTeam"].tolist()
-        )
+    value = re.sub(
+        r"\s+",
+        " ",
+        value,
     )
 
-    return players, teams
+    return value.strip()
 
 
-players, teams = load_entities()
+def compact(value: str) -> str:
+    """
+    Remove spaces for compact aliases.
+    """
+    return normalize(value).replace(" ", "")
 
 
-def resolve_entity(
-    user_value: str,
-    entity_type: str,
-) -> dict:
+# ============================================================
+# LOAD DATASET
+# ============================================================
 
-    if entity_type == "player":
-        candidates = players
+def load_dataset() -> pd.DataFrame:
+    if not os.path.exists(DATASET_PATH):
+        raise FileNotFoundError(
+            f"Dataset not found: {DATASET_PATH}"
+        )
 
-    elif entity_type == "team":
-        candidates = teams
-
-    else:
-        return {
-            "status": "not_supported",
-            "resolved_value": None,
-            "candidates": [],
-        }
-
-    user_normalized = normalize(
-        user_value
+    return pd.read_csv(
+        DATASET_PATH,
+        low_memory=False,
     )
 
-    # Team aliases.
-    if entity_type == "team":
 
-        alias = TEAM_ALIASES.get(
-            user_normalized
-        )
+df = load_dataset()
 
-        if alias and alias in candidates:
-            return {
-                "status": "resolved",
-                "resolved_value": alias,
-                "score": 100,
-                "candidates": [],
-            }
 
-    # Player aliases.
-    if entity_type == "player":
+# ============================================================
+# EXTRACT PLAYERS
+# ============================================================
 
-        alias = PLAYER_ALIASES.get(
-            user_normalized
-        )
-
-        if alias and alias in candidates:
-            return {
-                "status": "resolved",
-                "resolved_value": alias,
-                "score": 100,
-                "candidates": [],
-            }
-
-    # Exact match.
-    for candidate in candidates:
-
-        if (
-            normalize(candidate)
-            == user_normalized
-        ):
-            return {
-                "status": "resolved",
-                "resolved_value": candidate,
-                "score": 100,
-                "candidates": [],
-            }
-
-    # Initial + surname.
-    user_parts = user_normalized.split()
-
-    if len(user_parts) >= 2:
-
-        user_initial = user_parts[0][0]
-        user_surname = user_parts[-1]
-
-        initial_matches = []
-
-        for candidate in candidates:
-
-            candidate_parts = normalize(
-                candidate
-            ).split()
-
-            if len(candidate_parts) < 2:
-                continue
-
-            candidate_initial = (
-                candidate_parts[0][0]
-            )
-
-            candidate_surname = (
-                candidate_parts[-1]
-            )
-
-            if (
-                candidate_initial
-                == user_initial
-                and candidate_surname
-                == user_surname
-            ):
-                initial_matches.append(
-                    candidate
-                )
-
-        if len(initial_matches) == 1:
-
-            return {
-                "status": "resolved",
-                "resolved_value": (
-                    initial_matches[0]
-                ),
-                "score": 100,
-                "candidates": [],
-            }
-
-        if len(initial_matches) > 1:
-
-            return {
-                "status": "ambiguous",
-                "resolved_value": None,
-                "score": 100,
-                "candidates": [
-                    (
-                        candidate,
-                        100,
-                    )
-                    for candidate in initial_matches
-                ],
-            }
-
-    # Unique first-name match.
-    if entity_type == "player":
-
-        first_name_matches = []
-
-        for candidate in candidates:
-
-            parts = normalize(
-                candidate
-            ).split()
-
-            if not parts:
-                continue
-
-            if (
-                parts[0]
-                == user_normalized
-            ):
-                first_name_matches.append(
-                    candidate
-                )
-
-        if len(first_name_matches) == 1:
-
-            return {
-                "status": "resolved",
-                "resolved_value": (
-                    first_name_matches[0]
-                ),
-                "score": 98,
-                "candidates": [],
-            }
-
-        if len(first_name_matches) > 1:
-
-            return {
-                "status": "ambiguous",
-                "resolved_value": None,
-                "score": 98,
-                "candidates": [
-                    (
-                        candidate,
-                        98,
-                    )
-                    for candidate in first_name_matches
-                ],
-            }
-
-    # Partial matching.
-    partial_matches = []
-
-    for candidate in candidates:
-
-        candidate_normalized = normalize(
-            candidate
-        )
-
-        if (
-            user_normalized
-            in candidate_normalized
-            or candidate_normalized
-            in user_normalized
-        ):
-            partial_matches.append(
-                candidate
-            )
-
-    if len(partial_matches) == 1:
-
-        return {
-            "status": "resolved",
-            "resolved_value": (
-                partial_matches[0]
-            ),
-            "score": 95,
-            "candidates": [],
-        }
-
-    if len(partial_matches) > 1:
-
-        return {
-            "status": "ambiguous",
-            "resolved_value": None,
-            "score": 95,
-            "candidates": [
-                (
-                    candidate,
-                    95,
-                )
-                for candidate in partial_matches
-            ],
-        }
-
-    # Fuzzy matching.
-    normalized_candidates = {
-        normalize(candidate): candidate
-        for candidate in candidates
-    }
-
-    matches = process.extract(
-        user_normalized,
-        normalized_candidates.keys(),
-        scorer=fuzz.WRatio,
-        limit=5,
-    )
-
-    matches = [
-        match
-        for match in matches
-        if match[1] >= 70
+def collect_players(dataframe: pd.DataFrame):
+    columns = [
+        "batter",
+        "bowler",
+        "non-striker",
+        "player_out",
     ]
 
-    if not matches:
+    values = set()
+
+    for column in columns:
+
+        if column not in dataframe.columns:
+            continue
+
+        series = (
+            dataframe[column]
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+
+        for value in series:
+
+            if not value:
+                continue
+
+            if value.lower() in {
+                "nan",
+                "none",
+                "null",
+            }:
+                continue
+
+            values.add(value)
+
+    return sorted(
+        values,
+        key=lambda value: normalize(value),
+    )
+
+
+players = collect_players(df)
+
+
+# ============================================================
+# EXTRACT TEAMS
+# ============================================================
+
+def collect_teams(dataframe: pd.DataFrame):
+
+    if "BattingTeam" not in dataframe.columns:
+        return []
+
+    values = (
+        dataframe["BattingTeam"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+
+    return sorted(
+        {
+            value
+            for value in values
+            if value
+        },
+        key=lambda value: normalize(value),
+    )
+
+
+teams = collect_teams(df)
+
+
+# ============================================================
+# DYNAMIC NAME ALIAS GENERATION
+# ============================================================
+
+def generate_name_aliases(name: str):
+    """
+    Generate aliases dynamically from the stored dataset name.
+
+    Example:
+
+        AB de Villiers
+
+    produces aliases such as:
+
+        ab de villiers
+        abdevilliers
+        abd
+        adv
+        abv
+        villiers
+        de villiers
+
+    No player names are hardcoded.
+    """
+
+    normalized = normalize(name)
+
+    if not normalized:
+        return set()
+
+    parts = normalized.split()
+
+    aliases = set()
+
+    # --------------------------------------------------------
+    # Full name
+    # --------------------------------------------------------
+
+    aliases.add(normalized)
+
+    # --------------------------------------------------------
+    # Compact full name
+    # --------------------------------------------------------
+
+    aliases.add(
+        normalized.replace(" ", "")
+    )
+
+    # --------------------------------------------------------
+    # Individual name components
+    # --------------------------------------------------------
+
+    for part in parts:
+
+        if len(part) >= 2:
+            aliases.add(part)
+
+    # --------------------------------------------------------
+    # Consecutive name combinations
+    # --------------------------------------------------------
+
+    for start in range(len(parts)):
+
+        for end in range(
+            start + 2,
+            len(parts) + 1,
+        ):
+
+            phrase = " ".join(
+                parts[start:end]
+            )
+
+            if len(phrase) >= 3:
+                aliases.add(phrase)
+
+    # --------------------------------------------------------
+    # Initials
+    #
+    # Example:
+    # AB de Villiers -> adv
+    # Virat Kohli    -> vk
+    # --------------------------------------------------------
+
+    initials = "".join(
+        part[0]
+        for part in parts
+        if part
+    )
+
+    if len(initials) >= 2:
+        aliases.add(initials)
+
+    # --------------------------------------------------------
+    # First stored token + initials of remaining tokens
+    #
+    # This is important for:
+    #
+    # AB de Villiers
+    # -> AB + D
+    # -> ABD
+    #
+    # --------------------------------------------------------
+
+    if len(parts) >= 2:
+
+        first_plus_remaining_initials = (
+            parts[0]
+            + "".join(
+                part[0]
+                for part in parts[1:]
+                if part
+            )
+        )
+
+        if len(
+            first_plus_remaining_initials
+        ) >= 2:
+
+            aliases.add(
+                first_plus_remaining_initials
+            )
+
+    # --------------------------------------------------------
+    # First token + last initial
+    # --------------------------------------------------------
+
+    if len(parts) >= 2:
+
+        first_plus_last_initial = (
+            parts[0]
+            + parts[-1][0]
+        )
+
+        if len(
+            first_plus_last_initial
+        ) >= 2:
+
+            aliases.add(
+                first_plus_last_initial
+            )
+
+    return {
+        normalize(alias)
+        for alias in aliases
+        if normalize(alias)
+    }
+
+
+# ============================================================
+# BUILD PLAYER ALIAS INDEX
+# ============================================================
+
+def build_player_alias_index():
+
+    alias_candidates = defaultdict(set)
+
+    for player in players:
+
+        for alias in generate_name_aliases(
+            player
+        ):
+
+            alias_candidates[alias].add(
+                player
+            )
+
+    return alias_candidates
+
+
+PLAYER_ALIAS_CANDIDATES = (
+    build_player_alias_index()
+)
+
+
+# Unique aliases only.
+#
+# Example:
+#
+# "abd" -> {"AB de Villiers"}
+#
+# becomes:
+#
+# PLAYER_ALIASES["abd"] = "AB de Villiers"
+#
+
+PLAYER_ALIASES = {}
+
+for alias, candidates in (
+    PLAYER_ALIAS_CANDIDATES.items()
+):
+
+    if len(candidates) == 1:
+
+        PLAYER_ALIASES[alias] = next(
+            iter(candidates)
+        )
+
+
+# ============================================================
+# BUILD TEAM ALIAS INDEX
+# ============================================================
+
+def generate_team_aliases(name: str):
+
+    normalized = normalize(name)
+
+    if not normalized:
+        return set()
+
+    parts = normalized.split()
+
+    aliases = {
+        normalized,
+        normalized.replace(" ", ""),
+    }
+
+    # Individual meaningful words
+    for part in parts:
+
+        if len(part) >= 2:
+            aliases.add(part)
+
+    # Initials
+    initials = "".join(
+        part[0]
+        for part in parts
+        if part
+    )
+
+    if len(initials) >= 2:
+        aliases.add(initials)
+
+    return {
+        normalize(alias)
+        for alias in aliases
+        if normalize(alias)
+    }
+
+
+def build_team_alias_index():
+
+    alias_candidates = defaultdict(set)
+
+    for team in teams:
+
+        for alias in generate_team_aliases(
+            team
+        ):
+
+            alias_candidates[alias].add(
+                team
+            )
+
+    return alias_candidates
+
+
+TEAM_ALIAS_CANDIDATES = (
+    build_team_alias_index()
+)
+
+
+TEAM_ALIASES = {}
+
+for alias, candidates in (
+    TEAM_ALIAS_CANDIDATES.items()
+):
+
+    if len(candidates) == 1:
+
+        TEAM_ALIASES[alias] = next(
+            iter(candidates)
+        )
+
+
+# ============================================================
+# EXACT MATCH HELPERS
+# ============================================================
+
+def exact_player_match(value: str):
+
+    normalized = normalize(value)
+
+    if not normalized:
+        return None
+
+    # Canonical player name
+    for player in players:
+
+        if normalize(player) == normalized:
+
+            return player
+
+    # Dynamic alias
+    return PLAYER_ALIASES.get(
+        normalized
+    )
+
+
+def exact_team_match(value: str):
+
+    normalized = normalize(value)
+
+    if not normalized:
+        return None
+
+    # Canonical team name
+    for team in teams:
+
+        if normalize(team) == normalized:
+
+            return team
+
+    # Dynamic alias
+    return TEAM_ALIASES.get(
+        normalized
+    )
+
+
+# ============================================================
+# ENTITY RESOLUTION
+# ============================================================
+
+def resolve_entity(
+    value: str,
+    entity_type: str,
+):
+
+    normalized_value = normalize(value)
+
+    if not normalized_value:
 
         return {
-            "status": "not_found",
+            "input": value,
+            "resolved": None,
             "resolved_value": None,
-            "score": 0,
-            "candidates": [],
+            "method": "empty",
+            "status": "not_found",
         }
 
-    # Ambiguity detection.
-    if len(matches) > 1:
+    # ========================================================
+    # PLAYER
+    # ========================================================
 
-        best_score = matches[0][1]
-        second_score = matches[1][1]
+    if entity_type == "player":
+
+        # ----------------------------------------------------
+        # Exact canonical name
+        # ----------------------------------------------------
+
+        for player in players:
+
+            if normalize(player) == normalized_value:
+
+                return {
+                    "input": value,
+                    "resolved": player,
+                    "resolved_value": player,
+                    "method": "exact",
+                    "score": 1.0,
+                    "status": "resolved",
+                }
+
+        # ----------------------------------------------------
+        # Exact dynamic alias
+        # ----------------------------------------------------
+
+        candidates = (
+            PLAYER_ALIAS_CANDIDATES.get(
+                normalized_value,
+                set(),
+            )
+        )
+
+        if len(candidates) == 1:
+
+            player = next(
+                iter(candidates)
+            )
+
+            return {
+                "input": value,
+                "resolved": player,
+                "resolved_value": player,
+                "method": "alias",
+                "score": 1.0,
+                "status": "resolved",
+            }
+
+        if len(candidates) > 1:
+
+            return {
+                "input": value,
+                "resolved": None,
+                "resolved_value": None,
+                "method": "ambiguous_alias",
+                "score": 1.0,
+                "candidates": sorted(
+                    candidates
+                ),
+                "status": "ambiguous",
+            }
+
+        # ----------------------------------------------------
+        # Fuzzy matching
+        # ----------------------------------------------------
+
+        scored = []
+
+        for player in players:
+
+            player_normalized = normalize(
+                player
+            )
+
+            score = SequenceMatcher(
+                None,
+                normalized_value,
+                player_normalized,
+            ).ratio()
+
+            scored.append(
+                (
+                    score,
+                    player,
+                )
+            )
+
+        scored.sort(
+            reverse=True,
+            key=lambda item: item[0],
+        )
+
+        if not scored:
+
+            return {
+                "input": value,
+                "resolved": None,
+                "resolved_value": None,
+                "method": "not_found",
+                "status": "not_found",
+            }
+
+        best_score, best_player = (
+            scored[0]
+        )
+
+        second_score = (
+            scored[1][0]
+            if len(scored) > 1
+            else 0
+        )
+
+        # More conservative thresholds.
+        threshold = (
+            0.92
+            if len(normalized_value) <= 4
+            else 0.88
+        )
+
+        if best_score < threshold:
+
+            return {
+                "input": value,
+                "resolved": None,
+                "resolved_value": None,
+                "method": "fuzzy",
+                "score": best_score,
+                "status": "not_found",
+            }
+
+        # Avoid unsafe fuzzy resolutions.
+        if (
+            best_score - second_score
+            < 0.05
+        ):
+
+            ambiguous_candidates = [
+                player
+                for score, player in scored[:5]
+                if (
+                    best_score - score
+                ) < 0.05
+            ]
+
+            return {
+                "input": value,
+                "resolved": None,
+                "resolved_value": None,
+                "method": "fuzzy_ambiguous",
+                "score": best_score,
+                "candidates": ambiguous_candidates,
+                "status": "ambiguous",
+            }
+
+        return {
+            "input": value,
+            "resolved": best_player,
+            "resolved_value": best_player,
+            "method": "fuzzy",
+            "score": best_score,
+            "status": "resolved",
+        }
+
+    # ========================================================
+    # TEAM
+    # ========================================================
+
+    if entity_type == "team":
+
+        # Exact canonical
+        for team in teams:
+
+            if normalize(team) == normalized_value:
+
+                return {
+                    "input": value,
+                    "resolved": team,
+                    "resolved_value": team,
+                    "method": "exact",
+                    "score": 1.0,
+                    "status": "resolved",
+                }
+
+        # Exact alias
+        candidates = (
+            TEAM_ALIAS_CANDIDATES.get(
+                normalized_value,
+                set(),
+            )
+        )
+
+        if len(candidates) == 1:
+
+            team = next(
+                iter(candidates)
+            )
+
+            return {
+                "input": value,
+                "resolved": team,
+                "resolved_value": team,
+                "method": "alias",
+                "score": 1.0,
+                "status": "resolved",
+            }
+
+        if len(candidates) > 1:
+
+            return {
+                "input": value,
+                "resolved": None,
+                "resolved_value": None,
+                "method": "ambiguous_alias",
+                "score": 1.0,
+                "candidates": sorted(
+                    candidates
+                ),
+                "status": "ambiguous",
+            }
+
+        # Fuzzy team matching
+
+        scored = []
+
+        for team in teams:
+
+            team_normalized = normalize(
+                team
+            )
+
+            score = SequenceMatcher(
+                None,
+                normalized_value,
+                team_normalized,
+            ).ratio()
+
+            scored.append(
+                (
+                    score,
+                    team,
+                )
+            )
+
+        scored.sort(
+            reverse=True,
+            key=lambda item: item[0],
+        )
+
+        if not scored:
+
+            return {
+                "input": value,
+                "resolved": None,
+                "resolved_value": None,
+                "method": "not_found",
+                "status": "not_found",
+            }
+
+        best_score, best_team = scored[0]
+
+        second_score = (
+            scored[1][0]
+            if len(scored) > 1
+            else 0
+        )
+
+        threshold = 0.88
+
+        if best_score < threshold:
+
+            return {
+                "input": value,
+                "resolved": None,
+                "resolved_value": None,
+                "method": "fuzzy",
+                "score": best_score,
+                "status": "not_found",
+            }
 
         if (
             best_score - second_score
-            < 5
+            < 0.05
         ):
+
+            candidates = [
+                team
+                for score, team in scored[:5]
+                if (
+                    best_score - score
+                ) < 0.05
+            ]
 
             return {
-                "status": "ambiguous",
+                "input": value,
+                "resolved": None,
                 "resolved_value": None,
+                "method": "fuzzy_ambiguous",
                 "score": best_score,
-                "candidates": [
-                    (
-                        normalized_candidates[
-                            match[0]
-                        ],
-                        match[1],
-                    )
-                    for match in matches
-                ],
+                "candidates": candidates,
+                "status": "ambiguous",
             }
 
-    best_match = matches[0]
-
-    return {
-        "status": "resolved",
-        "resolved_value": (
-            normalized_candidates[
-                best_match[0]
-            ]
-        ),
-        "score": best_match[1],
-        "candidates": [],
-    }
-
-
-def resolve_subject(
-    subject: Subject,
-) -> dict:
-
-    if subject.entity_type not in {
-        "player",
-        "team",
-    }:
         return {
-            "status": "not_supported",
-            "subject": subject,
-            "candidates": [],
-        }
-
-    result = resolve_entity(
-        str(subject.value),
-        subject.entity_type,
-    )
-
-    if result["status"] == "resolved":
-
-        resolved_subject = (
-            subject.model_copy(
-                deep=True
-            )
-        )
-
-        resolved_subject.value = (
-            result["resolved_value"]
-        )
-
-        return {
+            "input": value,
+            "resolved": best_team,
+            "resolved_value": best_team,
+            "method": "fuzzy",
+            "score": best_score,
             "status": "resolved",
-            "subject": resolved_subject,
-            "candidates": [],
         }
 
+    # ========================================================
+    # UNSUPPORTED ENTITY TYPE
+    # ========================================================
+
     return {
-        "status": result["status"],
-        "subject": subject,
-        "candidates": result.get(
-            "candidates",
-            [],
-        ),
+        "input": value,
+        "resolved": None,
+        "resolved_value": None,
+        "method": "unsupported_entity_type",
+        "status": "unsupported",
     }
 
 
-def add_ambiguity(
-    result: QueryAnalysis,
-    entity_type: str,
-    user_value: str,
-    candidates: list,
-) -> None:
+# ============================================================
+# FIND PLAYER MENTIONS
+# ============================================================
 
-    candidate_names = [
-        candidate[0]
-        for candidate in candidates
-    ]
+def find_player_mentions(question: str):
+    """
+    Find dynamically generated player aliases
+    inside a natural-language question.
+    """
 
-    for ambiguity in result.ambiguities:
+    normalized_question = normalize(
+        question
+    )
 
-        if (
-            ambiguity.entity_type
-            == entity_type
-            and ambiguity.user_value
-            == user_value
+    if not normalized_question:
+        return []
+
+    mentions = []
+
+    # Longest aliases first.
+    #
+    # This prevents a short alias from stealing
+    # a longer player name.
+    aliases = sorted(
+        PLAYER_ALIAS_CANDIDATES.keys(),
+        key=lambda alias: (
+            len(alias),
+            alias.count(" "),
+        ),
+        reverse=True,
+    )
+
+    occupied_ranges = []
+
+    for alias in aliases:
+
+        pattern = re.compile(
+            rf"\b{re.escape(alias)}\b",
+            re.IGNORECASE,
+        )
+
+        for match in pattern.finditer(
+            normalized_question
         ):
-            return
 
-    result.ambiguities.append(
-        Ambiguity(
-            entity_type=entity_type,
-            user_value=user_value,
-            candidates=candidate_names,
+            start = match.start()
+            end = match.end()
+
+            # Skip overlapping shorter aliases.
+            overlap = False
+
+            for existing_start, existing_end in occupied_ranges:
+
+                if (
+                    start < existing_end
+                    and end > existing_start
+                ):
+                    overlap = True
+                    break
+
+            if overlap:
+                continue
+
+            candidates = (
+                PLAYER_ALIAS_CANDIDATES.get(
+                    alias,
+                    set(),
+                )
+            )
+
+            if len(candidates) != 1:
+                continue
+
+            canonical_player = next(
+                iter(candidates)
+            )
+
+            mentions.append(
+                {
+                    "input": match.group(0),
+                    "value": match.group(0),
+                    "resolved": canonical_player,
+                    "resolved_value": canonical_player,
+                    "status": "resolved",
+                }
+            )
+
+            occupied_ranges.append(
+                (start, end)
+            )
+
+    # Longest match first.
+    mentions.sort(
+        key=lambda item: len(
+            item["input"]
+        ),
+        reverse=True,
+    )
+
+    return mentions
+
+
+# ============================================================
+# DEBUG INFORMATION
+# ============================================================
+
+def get_player_aliases_for_debug(
+    player_name: str
+):
+    """
+    Useful for testing generated aliases.
+    """
+
+    return sorted(
+        generate_name_aliases(
+            player_name
         )
     )
 
 
-def resolve_query_analysis(
-    analysis: QueryAnalysis,
-) -> QueryAnalysis:
-
-    result = analysis.model_copy(
-        deep=True
-    )
-
-    if result.query is None:
-        return result
-
-    query = result.query
-
-    # Resolve normal subjects.
-    resolved_subjects = []
-
-    for subject in query.subjects:
-
-        resolution = resolve_subject(
-            subject
-        )
-
-        if resolution["status"] == "resolved":
-
-            resolved_subjects.append(
-                resolution["subject"]
-            )
-
-        elif (
-            resolution["status"]
-            == "ambiguous"
-        ):
-
-            result.status = (
-                "clarification_required"
-            )
-
-            add_ambiguity(
-                result,
-                subject.entity_type,
-                str(subject.value),
-                resolution["candidates"],
-            )
-
-            resolved_subjects.append(
-                subject
-            )
-
-        else:
-
-            result.status = (
-                "clarification_required"
-            )
-
-            add_ambiguity(
-                result,
-                subject.entity_type,
-                str(subject.value),
-                [],
-            )
-
-            resolved_subjects.append(
-                subject
-            )
-
-    query.subjects = resolved_subjects
-
-    # Resolve comparison subjects.
-    if query.comparison:
-
-        resolved_comparison_subjects = []
-
-        for subject in (
-            query.comparison.subjects
-        ):
-
-            resolution = resolve_subject(
-                subject
-            )
-
-            if (
-                resolution["status"]
-                == "resolved"
-            ):
-
-                resolved_comparison_subjects.append(
-                    resolution["subject"]
-                )
-
-            elif (
-                resolution["status"]
-                == "ambiguous"
-            ):
-
-                result.status = (
-                    "clarification_required"
-                )
-
-                add_ambiguity(
-                    result,
-                    subject.entity_type,
-                    str(subject.value),
-                    resolution["candidates"],
-                )
-
-                # Keep the ambiguous subject.
-                resolved_comparison_subjects.append(
-                    subject
-                )
-
-            else:
-
-                result.status = (
-                    "clarification_required"
-                )
-
-                add_ambiguity(
-                    result,
-                    subject.entity_type,
-                    str(subject.value),
-                    [],
-                )
-
-                # Keep the unresolved subject.
-                resolved_comparison_subjects.append(
-                    subject
-                )
-
-        query.comparison.subjects = (
-            resolved_comparison_subjects
-        )
-
-    # Resolve entity filters.
-    for filter_item in query.filters:
-
-        if (
-            filter_item.attribute
-            not in {
-                "player",
-                "batter",
-                "bowler",
-                "team",
-            }
-        ):
-            continue
-
-        entity_type = (
-            "team"
-            if filter_item.attribute
-            == "team"
-            else "player"
-        )
-
-        original_value = str(
-            filter_item.value
-        )
-
-        resolution = resolve_entity(
-            original_value,
-            entity_type,
-        )
-
-        if (
-            resolution["status"]
-            == "resolved"
-        ):
-
-            filter_item.value = (
-                resolution["resolved_value"]
-            )
-
-        elif (
-            resolution["status"]
-            == "ambiguous"
-        ):
-
-            result.status = (
-                "clarification_required"
-            )
-
-            add_ambiguity(
-                result,
-                entity_type,
-                original_value,
-                resolution["candidates"],
-            )
-
-        else:
-
-            result.status = (
-                "clarification_required"
-            )
-
-            add_ambiguity(
-                result,
-                entity_type,
-                original_value,
-                [],
-            )
-
-    # Generate clarification message.
-    if (
-        result.status
-        == "clarification_required"
-        and result.ambiguities
-    ):
-
-        ambiguity = result.ambiguities[0]
-
-        if ambiguity.candidates:
-
-            candidates_text = ", ".join(
-                ambiguity.candidates
-            )
-
-            result.clarification_question = (
-                f"Which "
-                f"{ambiguity.entity_type} "
-                f"do you mean by "
-                f"'{ambiguity.user_value}'? "
-                f"Candidates: "
-                f"{candidates_text}."
-            )
-
-        else:
-
-            result.clarification_question = (
-                f"I couldn't find a matching "
-                f"{ambiguity.entity_type} "
-                f"for "
-                f"'{ambiguity.user_value}'."
-            )
-
-    return result
-
-
-def resolve_query_plan(
-    query,
-) -> QueryAnalysis:
-
-    if isinstance(
-        query,
-        QueryAnalysis,
-    ):
-        return resolve_query_analysis(
-            query
-        )
-
-    raise TypeError(
-        "resolve_query_plan expects "
-        "a QueryAnalysis object."
-    )
-
+# ============================================================
+# CLI TEST
+# ============================================================
 
 if __name__ == "__main__":
 
     print(
-        "IPL Copilot - Entity Resolver"
+        "Players:",
+        len(players),
     )
 
     print(
-        "Type 'exit' to stop."
+        "Teams:",
+        len(teams),
     )
 
-    while True:
+    print(
+        "\nABD:",
+        PLAYER_ALIASES.get("abd"),
+    )
 
-        user_value = input(
-            "\nEnter player/team name: "
-        ).strip()
+    print(
+        "\nAB de Villiers aliases:"
+    )
 
-        if user_value.lower() in {
-            "exit",
-            "quit",
-            "q",
-        }:
-            break
-
-        entity_type = input(
-            "Entity type (player/team): "
-        ).strip().lower()
-
-        result = resolve_entity(
-            user_value,
-            entity_type,
+    print(
+        get_player_aliases_for_debug(
+            "AB de Villiers"
         )
+    )
 
-        print("\nResult:")
-        print(result)
+    print(
+        "\nQuestion mentions:"
+    )
+
+    print(
+        find_player_mentions(
+            "How many runs did ABD score?"
+        )
+    )
+
+    print(
+        "\nDirect resolution:"
+    )
+
+    print(
+        resolve_entity(
+            "ABD",
+            "player",
+        )
+    )
