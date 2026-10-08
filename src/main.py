@@ -216,9 +216,9 @@ def ask_question(
 
     try:
         answer = generate_response(
-            question,
-            result,
-        )
+        planner_result.get("resolved_question", question),
+        result,
+)
 
     except Exception as error:
         raise HTTPException(

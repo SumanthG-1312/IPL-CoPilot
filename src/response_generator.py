@@ -1,218 +1,159 @@
 import json
 import os
-import re
 
+import pandas as pd
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
-
+from langchain_groq import ChatGroq
+from langchain_core.messages import SystemMessage, HumanMessage
 
 load_dotenv()
 
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# ============================================================
-# GEMINI CONFIGURATION
-# ============================================================
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY is missing from .env")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+MODEL = os.getenv("GROQ_MODEL")
 
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY is missing from .env")
+if not MODEL:
+    raise ValueError("GROQ_MODEL is missing from .env")
 
-
-MODEL = os.getenv(
-    "GEMINI_MODEL",
-    "gemini-2.5-flash",
+llm = ChatGroq(
+    model=MODEL,
+    api_key=GROQ_API_KEY,
+    temperature=0.2,
 )
 
-
-client = genai.Client(
-    api_key=GEMINI_API_KEY
-)
-
-
-# ============================================================
-# SYSTEM PROMPT
-# ============================================================
 
 SYSTEM_PROMPT = """
 You are the final answer generation engine for IPL Copilot.
 
-Your job is to convert verified IPL data into a clear, natural-language answer.
+Your job is to convert a user's IPL analytics question and a VERIFIED
+database result into a clear natural-language answer.
 
 IMPORTANT RULES:
 
-- Answer ONLY using the verified result provided to you.
-- Do NOT calculate new statistics.
-- Do NOT invent facts.
-- Do NOT change numbers.
-- Do NOT introduce information that is not present in the verified result.
-- Use the player's full or resolved name when available.
-- Answer the user's actual question directly.
-- Do not simply repeat the raw result mechanically.
-- Make the response natural, readable, and conversational.
-- Give enough explanation to make the answer useful, but do not add unsupported information.
-- For a simple single-metric question, use 1-2 natural sentences.
-- For multiple metrics, use 2-4 sentences when appropriate.
-- For comparisons, clearly state the values and the comparison result.
-- For rankings, present the ranking clearly using numbered lines.
-- For multiple requested metrics, include every requested metric.
-- Preserve exact verified numbers.
-- Do not mention internal pipeline details.
-- Do not mention JSON, parser, executor, database, model, or prompts.
-- Return only the final answer in plain text.
+1. The database result is the ONLY source of truth.
+2. Never invent, estimate, calculate, or modify statistics.
+3. Never claim that data is unavailable when a valid result is provided.
+4. Interpret the result columns in the context of the user's question.
+5. Preserve numeric values exactly.
+6. Remove unnecessary decimal ".0" from whole numbers when presenting them.
+7. Use the player's/team's name from the question when appropriate.
+8. Do not mention SQL, DataFrame, database, query, or internal implementation.
+9. If multiple rows are returned, summarize them naturally.
+10. If multiple metrics are returned, explain them clearly.
+11. If the result is empty, clearly say that no matching data was found.
+12. Do not answer anything that is not supported by the verified result.
+13. Return ONLY the final answer. No JSON, markdown headings, or explanations
+    about your reasoning.
 """
 
 
-# ============================================================
-# SERIALIZE EXECUTOR RESULT
-# ============================================================
-
-def serialize_result(result) -> str:
-    """Convert executor output into text."""
+def serialize_result(result):
+    """
+    Convert different executor result types into clean JSON text.
+    """
 
     if result is None:
         return "No result was returned."
+
+    if isinstance(result, pd.DataFrame):
+        if result.empty:
+            return "[]"
+
+        records = result.to_dict(orient="records")
+
+        return json.dumps(
+            records,
+            indent=2,
+            default=str
+        )
 
     if isinstance(result, str):
         return result
 
     if isinstance(result, (int, float, bool)):
-        return str(result)
+        return json.dumps(result)
 
     if isinstance(result, dict):
         return json.dumps(
             result,
             indent=2,
-            ensure_ascii=False,
-            default=str,
+            default=str
         )
 
     if isinstance(result, list):
         return json.dumps(
             result,
             indent=2,
-            ensure_ascii=False,
-            default=str,
+            default=str
         )
 
     if hasattr(result, "to_dict"):
         try:
-            records = result.to_dict(
-                orient="records"
-            )
+            records = result.to_dict(orient="records")
 
             return json.dumps(
                 records,
                 indent=2,
-                ensure_ascii=False,
-                default=str,
+                default=str
             )
-
-        except TypeError:
+        except Exception:
             pass
 
     return str(result)
 
 
-# ============================================================
-# CLEAN GEMINI RESPONSE
-# ============================================================
-
-def clean_response(text: str) -> str:
-    """Remove unwanted model wrappers."""
+def clean_response(text):
+    """
+    Clean unnecessary formatting from the LLM response.
+    """
 
     if not text:
         return "I couldn't generate an answer."
 
-    text = re.sub(
-        r"<think>.*?</think>",
-        "",
-        text,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
+    text = text.strip()
 
-    text = text.replace(
-        "```text",
-        "",
-    )
+    # Remove accidental markdown code fences
+    if text.startswith("```") and text.endswith("```"):
+        lines = text.splitlines()
 
-    text = text.replace(
-        "```",
-        "",
-    )
+        if len(lines) >= 2:
+            text = "\n".join(lines[1:-1]).strip()
 
-    cleaned = text.strip()
-
-    if not cleaned:
-        return "I couldn't generate an answer."
-
-    return cleaned
+    return text
 
 
-# ============================================================
-# GEMINI RESPONSE GENERATION
-# ============================================================
-
-def generate_response(
-    user_question: str,
-    result,
-) -> str:
-    """Generate a natural-language answer from verified data."""
+def generate_response(user_question, result):
+    """
+    Generate the final natural-language answer from the
+    user's question and verified database result.
+    """
 
     result_text = serialize_result(result)
 
     user_prompt = f"""
-User question:
-
+User Question:
 {user_question}
 
-Verified IPL result:
-
+Verified IPL Result:
 {result_text}
 
-Generate a complete natural-language answer to the user's question.
-
-Make the answer informative but concise.
-
-For a simple statistic:
-- Clearly state the player or entity.
-- State the exact verified value.
-- Use a second sentence only when it adds useful context supported by the verified result.
-
-For comparisons:
-- Mention both subjects.
-- Include all requested metrics.
-- Clearly explain who leads for each metric.
-
-For rankings:
-- Introduce the ranking naturally.
-- Present all verified entries clearly.
-- Keep the ordering exactly as provided.
-
-For multiple metrics:
-- Include every requested metric.
-- Make the answer easy to read.
-
-Do not add facts that are not supported by the verified result.
-
-Return only the final answer.
+Generate the final answer to the user's question using ONLY the
+verified result above.
 """
 
-    # ========================================================
-    # GEMINI API CALL
-    # ========================================================
-
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0.2,
-            max_output_tokens=150,
-        ),
+    response = llm.invoke(
+        [
+            ("system", SYSTEM_PROMPT),
+            ("human", user_prompt),
+        ]
     )
 
-    answer = response.text
+    content = response.content
 
-    return clean_response(answer)
+    if not content:
+        raise ValueError("Groq returned an empty response.")
+
+    return content.strip()
