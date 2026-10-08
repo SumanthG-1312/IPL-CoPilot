@@ -5,8 +5,6 @@ import uuid
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from fastapi.middleware.cors import CORSMiddleware
-
 # ============================================================
 # INTERNAL MODULES
 # ============================================================
@@ -33,13 +31,13 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://ipl-co-pilot.vercel.app/",
+        "https://ipl-co-pilot.vercel.app",
+        "http://localhost:3000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # ============================================================
 # SESSION STORAGE
