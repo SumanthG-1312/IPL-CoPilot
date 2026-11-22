@@ -1,65 +1,83 @@
+from pathlib import Path
+import os
+
 import pandas as pd
 
-# Path to dataset
-DATA_PATH = "data/ipl_ball_by_ball.csv"
 
-# Load dataset
-df = pd.read_csv(DATA_PATH, sep=";")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_PATH = Path(
+    os.getenv(
+        "IPL_SOURCE_DATASET_PATH",
+        PROJECT_ROOT / "data" / "ipl_ball_by_ball.csv",
+    )
+)
+OUTPUT_PATH = Path(
+    os.getenv(
+        "IPL_DATASET_PATH",
+        PROJECT_ROOT / "data" / "ipl_ball_by_ball_cleaned.csv",
+    )
+)
 
-print("Dataset loaded successfully!")
-
-print("\nOriginal shape:")
-print(df.shape)
-
-
-# -----------------------------
-# Data Cleaning
-# -----------------------------
-
-# Remove unnecessary spaces from column names
-df.columns = df.columns.str.strip()
-
-# Convert string columns to clean strings
-string_columns = [
+REQUIRED_COLUMNS = {
+    "ID",
+    "innings",
+    "overs",
+    "ballnumber",
     "batter",
     "bowler",
-    "non-striker",
-    "BattingTeam"
-]
-
-for column in string_columns:
-    df[column] = df[column].astype(str).str.strip()
-
-
-# Fill missing values in event-related columns
-df["extra_type"] = df["extra_type"].fillna("None")
-df["player_out"] = df["player_out"].fillna("None")
-df["kind"] = df["kind"].fillna("None")
-df["fielders_involved"] = df["fielders_involved"].fillna("None")
-
-
-# Remove duplicate rows
-df = df.drop_duplicates()
+    "non-striker", 
+    "extra_type",
+    "batsman_run",
+    "extras_run",
+    "total_run",
+    "non_boundary",
+    "isWicketDelivery",
+    "player_out",
+    "kind",
+    "fielders_involved",
+    "BattingTeam",
+}
 
 
-# -----------------------------
-# Final information
-# -----------------------------
+def prepare_dataset(
+    input_path: Path = DATA_PATH,
+    output_path: Path = OUTPUT_PATH,
+) -> pd.DataFrame:
+    if not input_path.exists():
+        raise FileNotFoundError(f"Dataset not found: {input_path}")
 
-print("\nCleaned shape:")
-print(df.shape)
+    df = pd.read_csv(input_path, low_memory=False)
+    df.columns = df.columns.str.strip()
 
-print("\nMissing values after cleaning:")
-print(df.isnull().sum())
+    missing = REQUIRED_COLUMNS.difference(df.columns)
+    if missing:
+        raise ValueError(
+            "Dataset is missing required columns: "
+            + ", ".join(sorted(missing))
+        )
 
-print("\nSample data:")
-print(df.head())
+    for column in (
+        "batter",
+        "bowler",
+        "non-striker",
+        "BattingTeam",
+        "extra_type",
+        "player_out",
+        "kind",
+        "fielders_involved",
+    ):
+        df[column] = df[column].fillna("None").astype(str).str.strip()
+
+    df = df.drop_duplicates()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(output_path, index=False)
+    return df
 
 
-# Save cleaned dataset
-OUTPUT_PATH = "data/ipl_ball_by_ball_cleaned.csv"
-
-df.to_csv(OUTPUT_PATH, index=False)
-
-print("\nCleaned dataset saved successfully!")
-print(f"File: {OUTPUT_PATH}")
+if __name__ == "__main__":
+    prepared = prepare_dataset()
+    print(
+        f"Prepared {len(prepared):,} rows at "
+        f"{OUTPUT_PATH}"
+    )

@@ -18,11 +18,13 @@ import pandas as pd
 # matter where uvicorn / tests are launched from.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-DATASET_PATH = Path(
-    os.getenv(
-        "IPL_DATASET_PATH",
-        PROJECT_ROOT / "data" / "ipl_ball_by_ball_cleaned.csv",
-    )
+configured_dataset = os.getenv("IPL_DATASET_PATH")
+DATASET_PATH = (
+    Path(configured_dataset)
+    if configured_dataset and Path(configured_dataset).is_absolute()
+    else PROJECT_ROOT / configured_dataset
+    if configured_dataset
+    else PROJECT_ROOT / "data" / "ipl_ball_by_ball_cleaned.csv"
 )
 
 TABLE_NAME = "ipl_ball_by_ball_cleaned"

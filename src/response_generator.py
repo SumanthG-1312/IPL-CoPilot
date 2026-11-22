@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 from typing import Any, Optional
 
 import pandas as pd
@@ -16,31 +17,26 @@ from langchain_groq import ChatGroq
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-if not GROQ_API_KEY:
-    raise ValueError(
-        "GROQ_API_KEY is missing from .env"
-    )
-
-MODEL = os.getenv("GROQ_MODEL")
-
-if not MODEL:
-    raise ValueError(
-        "GROQ_MODEL is missing from .env"
-    )
+MODEL = os.getenv(
+    "GROQ_MODEL",
+    "llama-3.3-70b-versatile",
+)
 
 
 # ============================================================
 # LANGCHAIN GROQ
 # ============================================================
 
-llm = ChatGroq(
-    model=MODEL,
-    api_key=GROQ_API_KEY,
-    temperature=0.1,
-    max_tokens=700,
-    reasoning_effort="none",
-)
+llm = None
+
+if GROQ_API_KEY:
+    llm = ChatGroq(
+        model=MODEL,
+        api_key=GROQ_API_KEY,
+        temperature=0.1,
+        max_tokens=700,
+        reasoning_effort="none",
+    )
 
 
 # ============================================================
@@ -1397,6 +1393,12 @@ def generate_llm_response(
     """
     Use Groq for non-deterministic/non-tabular responses.
     """
+
+    if llm is None:
+        return (
+            "The available data was retrieved, but response generation "
+            "requires GROQ_API_KEY to be configured."
+        )
 
     prompt = RESPONSE_PROMPT.format(
         question=question,

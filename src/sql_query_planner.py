@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+from functools import lru_cache
+from pathlib import Path
 from typing import Literal, Optional
 
 from dotenv import load_dotenv
@@ -25,17 +27,15 @@ from .schema_inspector import inspect_csv
 
 load_dotenv()
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY is missing from .env")
-
-MODEL = os.getenv("GROQ_MODEL")
-
-if not MODEL:
-    raise ValueError("GROQ_MODEL is missing from .env")
-
-DATASET_PATH = "data/ipl_ball_by_ball_cleaned.csv"
+MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+configured_dataset = os.getenv("IPL_DATASET_PATH")
+DATASET_PATH = (
+    configured_dataset
+    if configured_dataset
+    else str(PROJECT_ROOT / "data" / "ipl_ball_by_ball_cleaned.csv")
+)
 TABLE_NAME = "ipl_ball_by_ball_cleaned"
 
 
@@ -43,13 +43,16 @@ TABLE_NAME = "ipl_ball_by_ball_cleaned"
 # LANGCHAIN GROQ
 # ============================================================
 
-llm = ChatGroq(
-    model=MODEL,
-    api_key=GROQ_API_KEY,
-    temperature=0,
-    max_tokens=900,
-    reasoning_effort="none",
-)
+llm = None
+
+if GROQ_API_KEY:
+    llm = ChatGroq(
+        model=MODEL,
+        api_key=GROQ_API_KEY,
+        temperature=0,
+        max_tokens=900,
+        reasoning_effort="none",
+    )
 
 
 # ============================================================
@@ -72,7 +75,11 @@ class SQLPlan(BaseModel):
     )
 
 
-structured_llm = llm.with_structured_output(SQLPlan)
+structured_llm = (
+    llm.with_structured_output(SQLPlan)
+    if llm is not None
+    else None
+)
 
 
 # ============================================================
@@ -928,6 +935,16 @@ def build_metric_context(
     )
 
 
+@lru_cache(maxsize=1)
+def get_schema_info() -> dict:
+    """Read and cache schema metadata once per process."""
+    return inspect_csv(DATASET_PATH)
+
+
+def get_schema_context() -> str:
+    return build_schema_context(get_schema_info())
+
+
 # ============================================================
 # LANGCHAIN PROMPT
 # ============================================================
@@ -1063,6 +1080,15 @@ def call_planner(
     schema_context: str,
     metric_context: str,
 ) -> SQLPlan:
+    if structured_llm is None:
+        return SQLPlan(
+            status="unsupported",
+            reason=(
+                "The Groq API key is not configured. "
+                "Set GROQ_API_KEY to answer queries that need "
+                "LLM-assisted planning."
+            ),
+        )
 
     prompt = PLANNER_PROMPT.format(
         table_name=TABLE_NAME,
@@ -1852,6 +1878,7 @@ WHERE bowler = '{player}'
 # MAIN SQL GENERATION PIPELINE
 # ============================================================
 
+@lru_cache(maxsize=256)
 def generate_sql(
     question: str,
 ):
@@ -1884,20 +1911,6 @@ def generate_sql(
     )
 
     # --------------------------------------------------------
-    # Inspect dataset schema
-    # --------------------------------------------------------
-
-    schema = inspect_csv(
-        DATASET_PATH
-    )
-
-    schema_context = (
-        build_schema_context(
-            schema
-        )
-    )
-
-    # --------------------------------------------------------
     # Detect metrics
     # --------------------------------------------------------
 
@@ -1921,12 +1934,6 @@ def generate_sql(
                 resolved_question
             )
         )
-
-    metric_context = (
-        build_metric_context(
-            requested_metrics
-        )
-    )
 
     # ========================================================
     # FAST PATH FIRST
@@ -1953,6 +1960,10 @@ def generate_sql(
 
     else:
 
+        schema_context = get_schema_context()
+        metric_context = build_metric_context(
+            requested_metrics
+        )
         result = call_planner(
             resolved_question,
             schema_context,
@@ -1999,10 +2010,11 @@ def generate_sql(
         sql
     )
 
-    sql = repair_schema_column_names(
-        sql,
-        schema,
-    )
+    if not fast_path:
+        sql = repair_schema_column_names(
+            sql,
+            get_schema_info(),
+        )
 
     # ========================================================
     # VALIDATE METRICS

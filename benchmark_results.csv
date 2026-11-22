@@ -1,0 +1,4 @@
+query,correct,median_ms,p95_ms,min_ms,max_ms,repeats
+row_count,True,1.937,2.91,1.499,3.475,15
+total_runs,True,2.293,5.095,1.809,5.352,15
+top_10_batters,True,24.6,27.417,22.426,27.832,15
